@@ -290,7 +290,16 @@ provides them). The APK only includes `arm64-v8a`.
 
 ### CI
 
-`.github/workflows/build.yml` runs on push, pull request and manual dispatch:
+> **Setup step:** the workflow is committed at `ci/build.yml` rather than
+> `.github/workflows/build.yml`. The credentials that created this
+> repository's first commit could not write workflow files. Enable CI with:
+>
+> ```sh
+> mkdir -p .github/workflows && git mv ci/build.yml .github/workflows/build.yml
+> git commit -m "Enable CI" && git push
+> ```
+
+`.github/workflows/build.yml` (see above) runs on push, pull request and manual dispatch:
 
 - **apk**: installs Nix (`DeterminateSystems/nix-installer-action`), enables
   `magic-nix-cache-action`, runs `nix build .#apk` and uploads the APK as the

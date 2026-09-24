@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:recognitionService="com.sivrad.assistant.service.StubRecognitionService"
+    android:sessionService="com.sivrad.assistant.service.AssistantSessionService"
+    android:settingsActivity="com.sivrad.assistant.ui.SetupActivity"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true"
+    android:supportsLocalInteraction="false" />

@@ -68,6 +68,27 @@ class AssistantController(
 
     /** Starts a new utterance. Called when the overlay appears and from the Speak button. */
     fun listen() {
+        startTurn { capture() }
+    }
+
+    /** Sends a typed message instead of a spoken one. */
+    fun submit(text: String) {
+        val typed = text.trim()
+        if (typed.isEmpty()) return
+        startTurn {
+            _state.update { it.copy(transcript = typed, response = "") }
+            if (loadAgent() != null) typed else null
+        }
+    }
+
+    /** The user switched to the keyboard: stop listening and drop what was heard so far. */
+    fun typeInstead() {
+        if (_state.value.phase != Phase.Listening && _state.value.phase != Phase.Loading) return
+        cancelWork()
+        _state.update { it.copy(phase = Phase.Idle, status = "", transcript = "") }
+    }
+
+    private fun startTurn(input: suspend () -> String?) {
         cancelWork()
         _state.update {
             // The finished exchange moves up into the history list.
@@ -80,7 +101,7 @@ class AssistantController(
         job = scope.launch {
             try {
                 lastText = null
-            val text = capture() ?: return@launch
+                val text = input() ?: return@launch
                 think(text)
             } catch (e: CancellationException) {
                 throw e
@@ -151,18 +172,8 @@ class AssistantController(
             _state.update { it.copy(phase = Phase.Error, status = "Microphone permission missing. Open Sivrad to grant it.") }
             return null
         }
-        _state.update { it.copy(phase = Phase.Loading, status = "Loading models…", transcript = "", response = "") }
-        val loaded = app.engine.awaitLoaded()
-        if (loaded == null) {
-            val why = when (val s = app.engine.status.value) {
-                AssistantEngine.Status.MissingModels -> "Models not downloaded. Open Sivrad to download them."
-                is AssistantEngine.Status.Failed -> "Could not load models: ${s.message}"
-                else -> "Models unavailable"
-            }
-            _state.update { it.copy(phase = Phase.Error, status = why) }
-            return null
-        }
-        if (agent == null) agent = Agent(loaded.llm, app.engine.registry)
+        _state.update { it.copy(transcript = "", response = "") }
+        val loaded = loadAgent() ?: return null
 
         manualStop.value = false
         _state.update { it.copy(phase = Phase.Listening, status = "Listening…") }
@@ -183,6 +194,23 @@ class AssistantController(
             return null
         }
         return final
+    }
+
+    /** Waits for the models; null (with the reason shown) if they are unavailable. */
+    private suspend fun loadAgent(): AssistantEngine.Loaded? {
+        _state.update { it.copy(phase = Phase.Loading, status = "Loading models…") }
+        val loaded = app.engine.awaitLoaded()
+        if (loaded == null) {
+            val why = when (val s = app.engine.status.value) {
+                AssistantEngine.Status.MissingModels -> "Models not downloaded. Open Sivrad to download them."
+                is AssistantEngine.Status.Failed -> "Could not load models: ${s.message}"
+                else -> "Models unavailable"
+            }
+            _state.update { it.copy(phase = Phase.Error, status = why) }
+            return null
+        }
+        if (agent == null) agent = Agent(loaded.llm, app.engine.registry)
+        return loaded
     }
 
     private suspend fun think(text: String) {

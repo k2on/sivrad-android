@@ -7,8 +7,10 @@ import android.os.Handler
 import android.os.Looper
 import android.service.voice.VoiceInteractionSession
 import android.view.View
+import android.view.WindowManager
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -27,6 +29,7 @@ import com.sivrad.core.tools.KeyguardGate
 import com.sivrad.core.tools.ToolEnvironment
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * The overlay. The system shows it on the assist gesture, over the lock
@@ -70,6 +73,10 @@ class AssistantSession(context: Context) :
     private val gate = KeyguardGate(context) { intent -> startAssistantActivity(intent) }
     private val controller = AssistantController(app, environment, gate, scope)
 
+    /** Drives the overlay's enter/exit animation; the window hides once the exit has played. */
+    private val visible = MutableStateFlow(false)
+    private var closing = false
+
     override fun onCreate() {
         super.onCreate()
         savedStateController.performRestore(null)
@@ -83,11 +90,20 @@ class AssistantSession(context: Context) :
                 SivradTheme {
                     AssistantOverlay(
                         state = controller.state,
+                        visible = visible,
                         onStop = controller::stop,
                         onListen = controller::listen,
                         onRetry = controller::retry,
                         onConfirm = controller::answerConfirmation,
-                        onDismiss = ::hide,
+                        onSubmit = controller::submit,
+                        onTypeInstead = controller::typeInstead,
+                        onDismiss = ::dismiss,
+                        onHidden = {
+                            if (closing) {
+                                closing = false
+                                hide()
+                            }
+                        },
                     )
                 }
             }
@@ -95,7 +111,19 @@ class AssistantSession(context: Context) :
         installOwners(view)
         // The window recomposer is resolved from the root view, so the
         // owners have to be on the window's decor view as well.
-        window?.window?.decorView?.let(::installOwners)
+        window?.window?.let { w ->
+            w.decorView.let(::installOwners)
+            // The overlay animates itself in and out.
+            w.setWindowAnimations(0)
+            // Session windows are made unable to take keyboard input by
+            // default; typing instead of speaking needs it back. Insets go to
+            // Compose so the card can ride up with the keyboard.
+            // TODO(on-device): check the keyboard comes up over the lock screen.
+            w.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            @Suppress("DEPRECATION")
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            WindowCompat.setDecorFitsSystemWindows(w, false)
+        }
         return view
     }
 
@@ -108,6 +136,8 @@ class AssistantSession(context: Context) :
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        closing = false
+        visible.value = true
         controller.listen()
     }
 
@@ -118,8 +148,18 @@ class AssistantSession(context: Context) :
         // startAssistantActivity hides this session at all, and whether the
         // overlay comes back afterwards.
         if (!controller.busyUnlocking) controller.reset()
+        closing = false
+        visible.value = false
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         super.onHide()
+    }
+
+    override fun onBackPressed() = dismiss()
+
+    /** Plays the exit animation, then hides. */
+    private fun dismiss() {
+        closing = true
+        visible.value = false
     }
 
     override fun onDestroy() {

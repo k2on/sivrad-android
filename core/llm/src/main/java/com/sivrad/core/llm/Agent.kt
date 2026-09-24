@@ -17,6 +17,9 @@ sealed interface AgentEvent {
     data class ToolStarted(val name: String) : AgentEvent
     data class ToolFinished(val name: String?, val result: ToolResult) : AgentEvent
     data class Reply(val text: String) : AgentEvent
+
+    /** Timings of this turn so far, summed over its model calls. */
+    data class Stats(val stats: GenerationStats, val modelCalls: Int) : AgentEvent
 }
 
 /**
@@ -25,7 +28,7 @@ sealed interface AgentEvent {
  */
 class Agent(
     private val engine: LlmEngine,
-    registry: ToolRegistry,
+    private val registry: ToolRegistry,
     private val maxToolRounds: Int = 3,
 ) {
     private val prompts = PromptBuilder(registry)
@@ -44,10 +47,13 @@ class Agent(
     fun respond(userText: String, executor: ToolExecutor): Flow<AgentEvent> = flow {
         val mark = history.size
         history += ChatMessage.user("$userText\n\n(${now()})")
+        var turnStats: GenerationStats? = null
+        var calls = 0
         try {
             repeat(maxToolRounds + 1) { round ->
                 emit(AgentEvent.Thinking)
-                val prompt = engine.render(prompts.messages(history))
+                var prompt = engine.render(prompts.messages(history))
+                if (engine.config.noThinking) prompt += NO_THINK
                 val out = StringBuilder()
                 // No tool calls on the last round: the model has to answer.
                 val g = if (round < maxToolRounds) grammar else null
@@ -56,6 +62,11 @@ class Agent(
                     ModelOutput.displayText(out.toString()).takeIf { it.isNotEmpty() }
                         ?.let { emit(AgentEvent.Partial(it)) }
                 }
+                val stats = engine.lastStats()
+                turnStats = turnStats?.plus(stats) ?: stats
+                calls++
+                emit(AgentEvent.Stats(turnStats!!, calls))
+
                 when (val parsed = ModelOutput.parse(out.toString())) {
                     is ModelOutput.Text -> {
                         val text = parsed.text.ifEmpty { "Sorry, I have no answer to that." }
@@ -69,6 +80,16 @@ class Agent(
                         val (name, result) = executor.execute(parsed.json)
                         emit(AgentEvent.ToolFinished(name, result))
                         history += ChatMessage.toolResponse(PromptBuilder.pythonJson(result.toModelJson()))
+                        // A tool whose own success message says it all ends
+                        // the turn without a second model call: that call is
+                        // roughly half the latency of a tool request. Errors
+                        // still go back to the model to explain.
+                        val tool = name?.let { registry[it] }
+                        if (result is ToolResult.Success && tool?.replyDirectly == true) {
+                            history += ChatMessage.assistant(result.content)
+                            emit(AgentEvent.Reply(result.content))
+                            return@flow
+                        }
                     }
                 }
             }
@@ -94,6 +115,11 @@ class Agent(
 
     private fun toolName(json: String) =
         Regex("\"name\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: "tool"
+
+    private companion object {
+        /** What Qwen3's template emits for `enable_thinking=false`. */
+        const val NO_THINK = "<think>\n\n</think>\n\n"
+    }
 
     private fun now() =
         "current time: " + SimpleDateFormat("EEEE yyyy-MM-dd HH:mm", Locale.US).format(Date())

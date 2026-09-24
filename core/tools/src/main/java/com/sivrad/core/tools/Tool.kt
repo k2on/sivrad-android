@@ -19,6 +19,13 @@ interface Tool {
     val requiresUnlock: Boolean
 
     /**
+     * When the call succeeds, show its [ToolResult.Success.content] as the
+     * reply instead of asking the model to phrase one, saving a model call.
+     * For tools whose success message is already a complete answer.
+     */
+    val replyDirectly: Boolean get() = false
+
+    /**
      * Resolves already-validated [args] into something runnable. Must have no
      * side effects: the user may still decline the confirmation. Runs after
      * the unlock (if [requiresUnlock]).

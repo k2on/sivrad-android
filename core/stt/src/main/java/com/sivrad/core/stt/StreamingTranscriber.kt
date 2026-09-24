@@ -20,25 +20,41 @@ sealed interface TranscriptUpdate {
     /** The hypothesis so far; may still change. */
     data class Partial(override val text: String) : TranscriptUpdate
 
-    /** The audio ended; this is the transcript. */
-    data class Final(override val text: String) : TranscriptUpdate
+    /**
+     * The audio ended; [text] is the transcript. When a second-pass model
+     * re-transcribed the utterance, [streamingText] is what the streaming
+     * model had and [refineMillis] how long the second pass took.
+     */
+    data class Final(
+        override val text: String,
+        val streamingText: String = text,
+        val refineMillis: Long? = null,
+    ) : TranscriptUpdate
 }
 
-/** Files of a streaming Zipformer transducer. */
-data class ZipformerModel(
+/**
+ * Files of a streaming transducer: Zipformer (icefall, Kroko) or NeMo
+ * FastConformer. sherpa-onnx tells them apart from the model itself.
+ */
+data class StreamingAsrModel(
     val encoder: File,
     val decoder: File,
     val joiner: File,
     val tokens: File,
-) {
-    val files get() = listOf(encoder, decoder, joiner, tokens)
-}
+)
 
 /**
  * sherpa-onnx's streaming recognizer, loaded once. Each [transcribe] call is
- * one utterance on a fresh stream.
+ * one utterance on a fresh stream. With a [refiner], the utterance is
+ * transcribed again by an offline model once it ends, and that transcript is
+ * the final one: streaming models give the live preview, the offline model
+ * the accuracy.
  */
-class StreamingTranscriber(model: ZipformerModel, numThreads: Int = 2) {
+class StreamingTranscriber(
+    model: StreamingAsrModel,
+    numThreads: Int = 2,
+    private val refiner: OfflineTranscriber? = null,
+) {
     private val recognizer = OnlineRecognizer(
         assetManager = null,
         config = OnlineRecognizerConfig(
@@ -51,7 +67,6 @@ class StreamingTranscriber(model: ZipformerModel, numThreads: Int = 2) {
                 ),
                 tokens = model.tokens.absolutePath,
                 numThreads = numThreads,
-                modelType = "zipformer2",
             ),
             // End of speech is decided by the VAD (core:audio), not by the
             // recognizer's own endpoint rules.
@@ -70,9 +85,11 @@ class StreamingTranscriber(model: ZipformerModel, numThreads: Int = 2) {
      */
     fun transcribe(audio: Flow<FloatArray>): Flow<TranscriptUpdate> = flow {
         val stream = recognizer.createStream()
+        val utterance = if (refiner != null) SampleBuffer() else null
         try {
             var last = ""
             audio.collect { frame ->
+                utterance?.append(frame)
                 stream.acceptWaveform(frame, SAMPLE_RATE)
                 while (recognizer.isReady(stream)) recognizer.decode(stream)
                 val text = normalize(recognizer.getResult(stream).text)
@@ -81,25 +98,61 @@ class StreamingTranscriber(model: ZipformerModel, numThreads: Int = 2) {
                     emit(TranscriptUpdate.Partial(text))
                 }
             }
-            // Flush: a little silence so the last chunk is decoded, then end.
-            stream.acceptWaveform(FloatArray(SAMPLE_RATE * 3 / 10), SAMPLE_RATE)
+            // Flush with a second of silence. Streaming models hold back the
+            // last chunk(s) until they see right context; with only 0.3 s the
+            // final word or two was routinely dropped (tools/asr-bench: 19.6%
+            // → 14.6% WER on the old model, 24.7% → 5.7% on Kroko).
+            stream.acceptWaveform(FloatArray(SAMPLE_RATE), SAMPLE_RATE)
             stream.inputFinished()
             while (recognizer.isReady(stream)) recognizer.decode(stream)
-            emit(TranscriptUpdate.Final(normalize(recognizer.getResult(stream).text)))
+            val streamed = normalize(recognizer.getResult(stream).text)
+
+            if (refiner != null && utterance != null && utterance.size > SAMPLE_RATE / 4) {
+                val t0 = System.nanoTime()
+                val refined = normalize(refiner.transcribe(utterance.toArray()))
+                val ms = (System.nanoTime() - t0) / 1_000_000
+                // An empty second pass (e.g. it heard only noise) should not
+                // throw away what the streaming model heard.
+                emit(TranscriptUpdate.Final(refined.ifBlank { streamed }, streamed, ms))
+            } else {
+                emit(TranscriptUpdate.Final(streamed))
+            }
         } finally {
             stream.release()
         }
     }.flowOn(decodeThread)
 
-    fun release() = recognizer.release()
+    fun release() {
+        recognizer.release()
+        refiner?.release()
+    }
 
-    private companion object {
+    private class SampleBuffer {
+        private var data = FloatArray(SAMPLE_RATE * 4)
+        var size = 0
+            private set
+
+        fun append(frame: FloatArray) {
+            if (size + frame.size > data.size) data = data.copyOf(maxOf(data.size * 2, size + frame.size))
+            frame.copyInto(data, size)
+            size += frame.size
+        }
+
+        fun toArray(): FloatArray = data.copyOf(size)
+    }
+
+    internal companion object {
         const val SAMPLE_RATE = 16_000
 
-        /** The English Zipformer emits upper case with no punctuation. */
+        /**
+         * Icefall's English models emit upper case with no punctuation; bring
+         * that to sentence case. Anything already cased (Kroko, NeMo,
+         * Parakeet, Moonshine) is left alone.
+         */
         fun normalize(raw: String): String {
-            val t = raw.trim().lowercase(Locale.US)
-            return t.replaceFirstChar { it.titlecase(Locale.US) }
+            val t = raw.trim().replace(Regex("\\s+"), " ")
+            if (t.any { it.isLowerCase() }) return t
+            return t.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }
         }
     }
 }

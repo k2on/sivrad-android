@@ -136,6 +136,9 @@ private fun Conversation(s: UiState) {
         if (s.response.isNotEmpty()) {
             Text(s.response, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
         }
+        s.stats?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
     }
 }
 

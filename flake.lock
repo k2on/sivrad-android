@@ -59,6 +59,23 @@
         "type": "github"
       }
     },
+    "kleidiai": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1776261917,
+        "narHash": "sha256-EqA/2Nu8/CGiBFK5EcCp6FVuBmmx6sV8x+g1Fx5HSh4=",
+        "owner": "ARM-software",
+        "repo": "kleidiai",
+        "rev": "0b2ee513397578a272a4e8a6c12589ef6534371c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ARM-software",
+        "ref": "v1.24.0",
+        "repo": "kleidiai",
+        "type": "github"
+      }
+    },
     "llama-cpp": {
       "flake": false,
       "locked": {
@@ -96,6 +113,7 @@
       "inputs": {
         "android": "android",
         "flake-parts": "flake-parts",
+        "kleidiai": "kleidiai",
         "llama-cpp": "llama-cpp",
         "nixpkgs": "nixpkgs"
       }

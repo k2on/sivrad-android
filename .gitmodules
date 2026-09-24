@@ -2,3 +2,7 @@
 	path = core/llm/src/main/cpp/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp
 	shallow = true
+[submodule "core/llm/src/main/cpp/kleidiai"]
+	path = core/llm/src/main/cpp/kleidiai
+	url = https://github.com/ARM-software/kleidiai
+	shallow = true

@@ -27,6 +27,7 @@ class SetTimerTool : Tool {
     override val name = "set_timer"
     override val description = "Start a countdown timer on the phone's clock app."
     override val requiresUnlock = false
+    override val replyDirectly = true
     override val parameters = ObjectSchema.of(
         "duration_seconds" to IntegerParam("Timer length in seconds.", min = 1, max = 86_400),
         "label" to StringParam("Optional name shown on the timer.", maxLength = 60),
@@ -55,6 +56,7 @@ class SetAlarmTool : Tool {
     override val name = "set_alarm"
     override val description = "Set an alarm on the phone's clock app. Repeats weekly on the given days, or rings once if no days are given."
     override val requiresUnlock = false
+    override val replyDirectly = true
     override val parameters = ObjectSchema.of(
         "hour" to IntegerParam("Hour, 24-hour clock.", min = 0, max = 23),
         "minute" to IntegerParam("Minute.", min = 0, max = 59),

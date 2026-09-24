@@ -21,6 +21,13 @@
       url = "github:ggml-org/llama.cpp/b11160";
       flake = false;
     };
+    # KleidiAI, which llama.cpp would otherwise download at configure time.
+    # Same commit as the submodule at core/llm/src/main/cpp/kleidiai and the
+    # version llama.cpp b11160 pins.
+    kleidiai = {
+      url = "github:ARM-software/kleidiai/v1.24.0";
+      flake = false;
+    };
   };
 
   outputs = inputs@{ flake-parts, ... }:
@@ -50,13 +57,16 @@
             cp -r CMakeLists.txt LICENSE licenses cmake common ggml include src vendor $out/
           '';
 
-          # Puts llama.cpp where the submodule would be. Shared by the state
-          # layer and the build, so both see the same tree with the same
-          # (store-normalised) timestamps.
+          # Puts llama.cpp and KleidiAI where the submodules would be. Shared
+          # by the state layer and the build, so both see the same tree with
+          # the same (store-normalised) timestamps.
           prepare = ''
-            rm -rf core/llm/src/main/cpp/llama.cpp
-            cp -r --preserve=timestamps ${llamaCpp} core/llm/src/main/cpp/llama.cpp
-            chmod -R u+w core/llm/src/main/cpp/llama.cpp
+            for dep in llama.cpp:${llamaCpp} kleidiai:${inputs.kleidiai}; do
+              dest=core/llm/src/main/cpp/''${dep%%:*}
+              rm -rf "$dest"
+              cp -r --preserve=timestamps "''${dep#*:}" "$dest"
+              chmod -R u+w "$dest"
+            done
           '';
 
           gradleProject = lib.fileset.unions [

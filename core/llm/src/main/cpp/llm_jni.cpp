@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -34,7 +35,16 @@ struct Session {
     // prompt is evaluated once per process rather than once per turn.
     std::vector<llama_token> cached;
     std::atomic<bool> abort{false};
+    // Timings of the last generate(), read back by lastStats().
+    struct {
+        int promptTokens = 0, reusedTokens = 0, generatedTokens = 0;
+        double prefillMs = 0, generateMs = 0;
+    } stats;
 };
+
+double msSince(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
 
 void throwIllegalState(JNIEnv * env, const std::string & msg) {
     jclass cls = env->FindClass("java/lang/IllegalStateException");
@@ -132,7 +142,8 @@ bool evalPrompt(Session * s, const std::vector<llama_token> & prompt, std::strin
         s->cached.insert(s->cached.end(), prompt.begin() + static_cast<long>(i),
                          prompt.begin() + static_cast<long>(i + n));
     }
-    LOGI("prompt: %zu tokens, %zu reused from cache", prompt.size(), keep);
+    s->stats.promptTokens = static_cast<int>(prompt.size());
+    s->stats.reusedTokens = static_cast<int>(keep);
     return true;
 }
 
@@ -235,6 +246,18 @@ Java_com_sivrad_core_llm_LlamaNative_abort(JNIEnv *, jobject, jlong handle) {
     if (s != nullptr) s->abort.store(true);
 }
 
+// {promptTokens, reusedTokens, prefillMs, generatedTokens, generateMs} of the last generate().
+JNIEXPORT jfloatArray JNICALL
+Java_com_sivrad_core_llm_LlamaNative_lastStats(JNIEnv * env, jobject, jlong handle) {
+    const auto & st = reinterpret_cast<Session *>(handle)->stats;
+    const float v[5] = {static_cast<float>(st.promptTokens), static_cast<float>(st.reusedTokens),
+                        static_cast<float>(st.prefillMs), static_cast<float>(st.generatedTokens),
+                        static_cast<float>(st.generateMs)};
+    jfloatArray out = env->NewFloatArray(5);
+    env->SetFloatArrayRegion(out, 0, 5, v);
+    return out;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_sivrad_core_llm_LlamaNative_contextSize(JNIEnv *, jobject, jlong handle) {
     return static_cast<jint>(llama_n_ctx(reinterpret_cast<Session *>(handle)->ctx));
@@ -310,12 +333,20 @@ Java_com_sivrad_core_llm_LlamaNative_generate(JNIEnv * env, jobject, jlong handl
         return 0;
     }
 
+    s->stats = {};
+    const auto tPrefill = std::chrono::steady_clock::now();
     std::string err;
-    if (!evalPrompt(s, tokens, err)) {
+    const bool ok = evalPrompt(s, tokens, err);
+    s->stats.prefillMs = msSince(tPrefill);
+    if (!ok) {
         if (err != "aborted") throwIllegalState(env, err);
         return 0;
     }
-    if (maxTokens <= 0) return 0;
+    if (maxTokens <= 0) {
+        LOGI("prefilled %d tok (%d cached) in %.0f ms", s->stats.promptTokens, s->stats.reusedTokens,
+             s->stats.prefillMs);
+        return 0;
+    }
 
     float sp[5] = {0.7f, 0.8f, 20.0f, 0.0f, 0.0f};
     if (jsampling != nullptr && env->GetArrayLength(jsampling) >= 5) {
@@ -346,6 +377,7 @@ Java_com_sivrad_core_llm_LlamaNative_generate(JNIEnv * env, jobject, jlong handl
 
     std::vector<llama_token_data> cur;
     std::string pending;
+    const auto tGenerate = std::chrono::steady_clock::now();
     int generated = 0;
     bool stop = false;
     while (!stop && generated < maxTokens && !s->abort.load()) {
@@ -378,6 +410,15 @@ Java_com_sivrad_core_llm_LlamaNative_generate(JNIEnv * env, jobject, jlong handl
 
     llama_sampler_free(chain);
     if (grammar != nullptr) llama_sampler_free(grammar);
+
+    s->stats.generatedTokens = generated;
+    s->stats.generateMs = msSince(tGenerate);
+    const auto & st = s->stats;
+    LOGI("prompt %d tok (%d cached) in %.0f ms = %.1f tok/s; generated %d tok in %.0f ms = %.1f tok/s",
+         st.promptTokens, st.reusedTokens, st.prefillMs,
+         st.prefillMs > 0 ? (st.promptTokens - st.reusedTokens) * 1000.0 / st.prefillMs : 0.0,
+         st.generatedTokens, st.generateMs,
+         st.generateMs > 0 ? st.generatedTokens * 1000.0 / st.generateMs : 0.0);
     return generated;
 }
 

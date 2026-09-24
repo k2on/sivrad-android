@@ -5,6 +5,7 @@ public class LlamaNative {
     public native void free(long h);
     public native void abort(long h);
     public native int contextSize(long h);
+    public native float[] lastStats(long h);
     public native byte[] applyTemplate(long h, byte[][] roles, byte[][] contents, boolean addAssistant);
     public native int generate(long h, byte[] prompt, byte[] grammar, int maxTokens, float[] sampling, TokenSink sink);
 }

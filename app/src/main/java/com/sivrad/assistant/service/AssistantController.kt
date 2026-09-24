@@ -41,6 +41,8 @@ data class UiState(
     val confirmation: Confirmation? = null,
     val earlier: List<Exchange> = emptyList(),
     val canRetry: Boolean = false,
+    /** Timings for this turn (speech second pass, model speed), when enabled in settings. */
+    val stats: String? = null,
 )
 
 /**
@@ -63,6 +65,8 @@ class AssistantController(
     private var pendingConfirmation: CompletableDeferred<Boolean>? = null
     private var lastText: String? = null
     private var lastTurnCompleted = false
+    private var refineNote: String? = null
+    private var llmName: String? = null
 
     val busyUnlocking: Boolean get() = gate.inFlight
 
@@ -151,7 +155,7 @@ class AssistantController(
             _state.update { it.copy(phase = Phase.Error, status = "Microphone permission missing. Open Sivrad to grant it.") }
             return null
         }
-        _state.update { it.copy(phase = Phase.Loading, status = "Loading models…", transcript = "", response = "") }
+        _state.update { it.copy(phase = Phase.Loading, status = "Loading models…", transcript = "", response = "", stats = null) }
         val loaded = app.engine.awaitLoaded()
         if (loaded == null) {
             val why = when (val s = app.engine.status.value) {
@@ -163,6 +167,7 @@ class AssistantController(
             return null
         }
         if (agent == null) agent = Agent(loaded.llm, app.engine.registry)
+        llmName = loaded.llmName
 
         manualStop.value = false
         _state.update { it.copy(phase = Phase.Listening, status = "Listening…") }
@@ -174,9 +179,13 @@ class AssistantController(
                 ev != EndpointEvent.MaxLength && !manualStop.value
         }
         var final = ""
+        refineNote = null
         loaded.transcriber.transcribe(audio).collect { u ->
             _state.update { it.copy(transcript = u.text) }
-            if (u is TranscriptUpdate.Final) final = u.text
+            if (u is TranscriptUpdate.Final) {
+                final = u.text
+                refineNote = u.refineMillis?.let { ms -> "${loaded.refinerName ?: "second pass"} ${ms} ms" }
+            }
         }
         if (final.isBlank()) {
             _state.update { it.copy(phase = Phase.Idle, status = "Didn't catch that") }
@@ -204,7 +213,7 @@ class AssistantController(
         )
         lastText = text
         lastTurnCompleted = false
-        _state.update { it.copy(transcript = text, response = "", canRetry = false) }
+        _state.update { it.copy(transcript = text, response = "", canRetry = false, stats = refineNote?.takeIf { showStats }) }
         a.respond(text, executor).collect { ev ->
             _state.update {
                 when (ev) {
@@ -217,6 +226,7 @@ class AssistantController(
                             is ToolResult.Error -> "${ev.name ?: "tool"}: ${r.message.take(80)}"
                         },
                     )
+                    is AgentEvent.Stats -> it.copy(stats = statsLine(ev))
                     is AgentEvent.Reply -> it.also { lastTurnCompleted = true }.copy(
                         phase = Phase.Idle,
                         status = "",
@@ -226,6 +236,20 @@ class AssistantController(
                 }
             }
         }
+    }
+
+    private val showStats get() = app.settings.values.value.showStats
+
+    private fun statsLine(ev: AgentEvent.Stats): String? {
+        if (!showStats) return null
+        val st = ev.stats
+        val llm = buildString {
+            append(llmName ?: "LLM")
+            append(": read %d tok in %.1f s".format(st.promptTokens - st.reusedTokens, st.prefillMillis / 1000f))
+            append(", wrote %d tok at %.1f tok/s".format(st.generatedTokens, st.generateTokensPerSecond))
+            if (ev.modelCalls > 1) append(" (${ev.modelCalls} calls)")
+        }
+        return listOfNotNull(refineNote, llm).joinToString(" · ")
     }
 
     private suspend fun confirm(c: Confirmation): Boolean {

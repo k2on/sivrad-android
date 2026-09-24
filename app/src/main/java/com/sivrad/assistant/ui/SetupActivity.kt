@@ -24,6 +24,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
@@ -35,11 +38,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -47,7 +52,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.sivrad.assistant.AssistantEngine
+import com.sivrad.assistant.models.ModelCatalog
 import com.sivrad.assistant.models.ModelDownloader
+import com.sivrad.assistant.models.ModelOption
+import com.sivrad.assistant.models.ModelSlot
 import com.sivrad.assistant.service.AssistantService
 import com.sivrad.assistant.sivrad
 import androidx.compose.runtime.LaunchedEffect
@@ -142,40 +150,102 @@ private fun ModelsSection() {
     val app = LocalContext.current.sivrad
     val state by app.downloader.state.collectAsState()
     val settings by app.settings.values.collectAsState()
-    val missing = remember(state, settings) { app.catalog.missing() }
+    // Bumped when files are deleted, so rows re-check the disk.
+    var diskVersion by remember { mutableIntStateOf(0) }
+    val missing = remember(state, settings, diskVersion) { app.catalog.missingForSelection() }
+    val busy = state is ModelDownloader.State.Running
+
     Section("2. Models") {
         Text(
-            "About 2.6 GB from Hugging Face: streaming Zipformer ASR, Silero VAD and the GGUF language model. " +
-                "Stored in device-protected storage so the assistant works before the first unlock. Wi-Fi recommended.",
+            "Pick one model per slot. Download several to compare them: the overlay shows timings under each reply. " +
+                "Files go to device-protected storage so the assistant works before the first unlock. Wi-Fi recommended.",
             style = MaterialTheme.typography.bodySmall,
         )
-        for (m in app.catalog.all()) {
-            val present = m !in missing
-            Text("${if (present) "✓" else "·"}  ${m.relativePath}", style = MaterialTheme.typography.bodyMedium)
+        DownloadProgress(state, onPause = { app.downloader.cancel() })
+        if (missing.isNotEmpty() && !busy) {
+            val mb = missing.sumOf { it.sizeBytes ?: 0L } / 1_000_000
+            Button(onClick = { app.downloader.start(missing) { app.engine.reload() } }) {
+                Text("Download selected models (${mb} MB)")
+            }
+        } else if (missing.isEmpty()) {
+            Text("✓ Everything selected is downloaded and verified.", style = MaterialTheme.typography.bodyMedium)
         }
-        when (val s = state) {
-            is ModelDownloader.State.Running -> {
-                val frac = s.total?.let { (s.bytes.toFloat() / it).coerceIn(0f, 1f) }
-                Text(
-                    "${if (s.verifying) "Verifying" else "Downloading"} ${s.file} (${s.index + 1}/${s.count})" +
-                        (s.total?.let { " — ${s.bytes / 1_000_000} / ${it / 1_000_000} MB" } ?: ""),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                if (frac != null && !s.verifying) {
-                    LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth())
-                } else {
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
+        for (slot in ModelSlot.entries) {
+            HorizontalDivider()
+            Text(slot.title, style = MaterialTheme.typography.titleSmall)
+            val selectedId = app.catalog.selected(slot).id
+            for (option in app.catalog.options(slot)) {
+                key(option.id, diskVersion, state) {
+                    ModelRow(
+                        option = option,
+                        selected = option.id == selectedId,
+                        downloaded = app.catalog.isDownloaded(option),
+                        busy = busy,
+                        onSelect = {
+                            app.settings.select(slot, option.id)
+                            app.engine.reload()
+                        },
+                        onDownload = {
+                            app.downloader.start(option.files) {
+                                if (app.catalog.selected(slot).id == option.id) app.engine.reload()
+                            }
+                        },
+                        onDelete = {
+                            app.catalog.delete(option)
+                            diskVersion++
+                            if (option.id == selectedId) app.engine.reload()
+                        },
+                    )
                 }
-                OutlinedButton(onClick = { app.downloader.cancel() }) { Text("Pause") }
             }
-            is ModelDownloader.State.Failed -> {
-                Text("Failed: ${s.message}", color = MaterialTheme.colorScheme.error)
-                Button(onClick = { app.downloader.start { app.engine.reload() } }) { Text("Retry download") }
-            }
-            else -> if (missing.isNotEmpty()) {
-                Button(onClick = { app.downloader.start { app.engine.reload() } }) { Text("Download models") }
+        }
+    }
+}
+
+@Composable
+private fun DownloadProgress(state: ModelDownloader.State, onPause: () -> Unit) {
+    when (state) {
+        is ModelDownloader.State.Running -> {
+            val frac = state.total?.let { (state.bytes.toFloat() / it).coerceIn(0f, 1f) }
+            Text(
+                "${if (state.verifying) "Verifying" else "Downloading"} ${state.file} (${state.index + 1}/${state.count})" +
+                    (state.total?.let { " — ${state.bytes / 1_000_000} / ${it / 1_000_000} MB" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (frac != null && !state.verifying) {
+                LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth())
             } else {
-                Text("All models present and verified.", style = MaterialTheme.typography.bodyMedium)
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            OutlinedButton(onClick = onPause) { Text("Pause") }
+        }
+        is ModelDownloader.State.Failed ->
+            Text("Download failed: ${state.message}", color = MaterialTheme.colorScheme.error)
+        else -> Unit
+    }
+}
+
+@Composable
+private fun ModelRow(
+    option: ModelOption,
+    selected: Boolean,
+    downloaded: Boolean,
+    busy: Boolean,
+    onSelect: () -> Unit,
+    onDownload: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Column(Modifier.weight(1f)) {
+            Text(option.label, style = MaterialTheme.typography.bodyMedium)
+            Text(option.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        when {
+            option.files.isEmpty() -> Unit
+            downloaded -> TextButton(onClick = onDelete, enabled = !busy) { Text("Delete") }
+            else -> TextButton(onClick = onDownload, enabled = !busy) {
+                Text(option.totalBytes?.let { "Get ${it / 1_000_000} MB" } ?: "Get")
             }
         }
     }
@@ -212,9 +282,11 @@ private fun SettingsSection() {
     val app = LocalContext.current.sivrad
     val current by app.settings.values.collectAsState()
     var allowlist by rememberSaveable(current) { mutableStateOf(current.httpAllowlist.joinToString("\n")) }
-    var url by rememberSaveable(current) { mutableStateOf(current.llmUrl) }
-    var sha by rememberSaveable(current) { mutableStateOf(current.llmSha256) }
+    var url by rememberSaveable(current) { mutableStateOf(current.customLlmUrl) }
+    var sha by rememberSaveable(current) { mutableStateOf(current.customLlmSha256) }
+    var noThinking by rememberSaveable(current) { mutableStateOf(current.customLlmNoThinking) }
     var threads by rememberSaveable(current) { mutableStateOf(current.llmThreads.toString()) }
+    var showStats by rememberSaveable(current) { mutableStateOf(current.showStats) }
     Section("4. Settings") {
         OutlinedTextField(
             value = allowlist,
@@ -226,43 +298,52 @@ private fun SettingsSection() {
         )
         HorizontalDivider()
         OutlinedTextField(
+            value = threads, onValueChange = { threads = it.filter(Char::isDigit).take(1) },
+            label = { Text("Inference threads (1–8)") },
+            supportingText = { Text("Tensor G3 has 1 big, 4 medium and 4 small cores; try 3–5 and compare tok/s.") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = showStats, onCheckedChange = { showStats = it })
+            Text("Show timings under replies", style = MaterialTheme.typography.bodyMedium)
+        }
+        HorizontalDivider()
+        Text("Custom language model", style = MaterialTheme.typography.titleSmall)
+        OutlinedTextField(
             value = url, onValueChange = { url = it },
-            label = { Text("Language model GGUF URL") },
+            label = { Text("GGUF URL (blank = none)") },
             modifier = Modifier.fillMaxWidth(),
         )
         OutlinedTextField(
             value = sha, onValueChange = { sha = it },
-            label = { Text("GGUF SHA-256 (blank = don't verify)") },
+            label = { Text("SHA-256 (blank = don't verify)") },
             modifier = Modifier.fillMaxWidth(),
         )
-        OutlinedTextField(
-            value = threads, onValueChange = { threads = it.filter(Char::isDigit).take(1) },
-            label = { Text("Inference threads (1–8)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = noThinking, onCheckedChange = { noThinking = it })
+            Text("Hybrid thinking model (Qwen3 base releases)", style = MaterialTheme.typography.bodyMedium)
+        }
         Text(
-            "The model must use a chat template llama.cpp recognises (ChatML-style works best) and the Hermes <tool_call> format, like Qwen3.",
+            "It appears under Language model once saved. It must use a chat template llama.cpp recognises " +
+                "(ChatML-style works best) and Qwen's Hermes <tool_call> format.",
             style = MaterialTheme.typography.bodySmall,
         )
-        Row {
-            Button(onClick = {
-                val modelChanged = url.trim() != current.llmUrl || threads.toIntOrNull() != current.llmThreads
-                app.settings.update {
-                    it.copy(
-                        httpAllowlist = allowlist.lines().map(String::trim).filter(String::isNotEmpty),
-                        llmUrl = url,
-                        llmSha256 = sha,
-                        llmThreads = threads.toIntOrNull() ?: it.llmThreads,
-                    )
-                }
-                if (modelChanged) app.engine.reload()
-            }) { Text("Save") }
-            Spacer(Modifier.width(8.dp))
-            OutlinedButton(onClick = {
-                url = com.sivrad.assistant.settings.AppSettings.DEFAULT_LLM_URL
-                sha = com.sivrad.assistant.settings.AppSettings.DEFAULT_LLM_SHA256
-            }) { Text("Default model") }
-        }
+        Button(onClick = {
+            val reload = threads.toIntOrNull() != current.llmThreads ||
+                (current.llmModel == ModelCatalog.CUSTOM_LLM &&
+                    (url.trim() != current.customLlmUrl || noThinking != current.customLlmNoThinking))
+            app.settings.update {
+                it.copy(
+                    httpAllowlist = allowlist.lines().map(String::trim).filter(String::isNotEmpty),
+                    customLlmUrl = url,
+                    customLlmSha256 = sha,
+                    customLlmNoThinking = noThinking,
+                    llmThreads = threads.toIntOrNull() ?: it.llmThreads,
+                    showStats = showStats,
+                )
+            }
+            if (reload) app.engine.reload()
+        }) { Text("Save") }
     }
 }
 

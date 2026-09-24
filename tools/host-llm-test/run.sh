@@ -4,6 +4,7 @@
 # grammar, the KV-cache prefix reuse and cancellation end to end.
 #
 #   tools/host-llm-test/run.sh path/to/model.gguf ["utterance" ...]
+#   SIVRAD_JAVA_OPTS=-Dsivrad.nothink=true run.sh qwen3-1.7b.gguf   # hybrid thinking models
 #
 # Needs: the llama.cpp submodule checked out, cmake, a C++ compiler, a JDK,
 # and the Android SDK for the Gradle step that writes the prompt and grammar.
@@ -36,5 +37,5 @@ g++ -O2 -shared -fPIC -std=c++17 -I"$here" -I"$jdk/include" -I"$jdk/include/linu
   -L"$work/llama/bin" -lllama -Wl,-rpath,"$work/llama/bin" -o "$work/libsivrad_llm.so"
 javac -d "$work/classes" "$here"/src/Main.java "$here"/src/com/sivrad/core/llm/*.java
 
-java -Dsivrad.lib="$work/libsivrad_llm.so" -cp "$work/classes" Main "$model" \
+java ${SIVRAD_JAVA_OPTS:-} -Dsivrad.lib="$work/libsivrad_llm.so" -cp "$work/classes" Main "$model" \
   "$root/core/llm/build/system-prompt.txt" "$root/core/llm/build/tool-grammar.gbnf" "$@"

@@ -21,7 +21,33 @@ data class LlmConfig(
     // the big cores. TODO(on-device): tune both against tokens/s and heat.
     val threads: Int = 4,
     val batchThreads: Int = 6,
+    /**
+     * For hybrid thinking models (Qwen3 0.6B/1.7B/4B base releases): start
+     * every reply with an empty think block, which is what their chat
+     * template does with `enable_thinking=false`. Instruct-2507 models do not
+     * think and must not get it.
+     */
+    val noThinking: Boolean = false,
 )
+
+/** Timings of one generate() call, from llama.cpp. */
+data class GenerationStats(
+    val promptTokens: Int,
+    val reusedTokens: Int,
+    val prefillMillis: Float,
+    val generatedTokens: Int,
+    val generateMillis: Float,
+) {
+    val prefillTokensPerSecond: Float
+        get() = if (prefillMillis > 0) (promptTokens - reusedTokens) * 1000f / prefillMillis else 0f
+    val generateTokensPerSecond: Float
+        get() = if (generateMillis > 0) generatedTokens * 1000f / generateMillis else 0f
+
+    operator fun plus(o: GenerationStats) = GenerationStats(
+        promptTokens + o.promptTokens, reusedTokens + o.reusedTokens, prefillMillis + o.prefillMillis,
+        generatedTokens + o.generatedTokens, generateMillis + o.generateMillis,
+    )
+}
 
 data class Sampling(
     // Qwen3-Instruct-2507's recommended settings.
@@ -106,6 +132,12 @@ class LlmEngine(val config: LlmConfig) {
         }
         awaitClose { if (job.isActive) LlamaNative.abort(h) }
     }.buffer(Channel.UNLIMITED)
+
+    /** Timings of the most recent [generate] or [prefill]. */
+    suspend fun lastStats(): GenerationStats = withContext(dispatcher) {
+        val v = LlamaNative.lastStats(requireHandle())
+        GenerationStats(v[0].toInt(), v[1].toInt(), v[2], v[3].toInt(), v[4])
+    }
 
     private fun requireHandle(): Long = handle.also { check(it != 0L) { "model not loaded" } }
 

@@ -2,11 +2,13 @@ package com.sivrad.assistant
 
 import android.util.Log
 import com.sivrad.assistant.models.ModelCatalog
+import com.sivrad.assistant.models.ModelOption
 import com.sivrad.assistant.settings.AppSettings
 import com.sivrad.core.audio.VadModel
 import com.sivrad.core.llm.Agent
 import com.sivrad.core.llm.LlmConfig
 import com.sivrad.core.llm.LlmEngine
+import com.sivrad.core.stt.OfflineTranscriber
 import com.sivrad.core.stt.StreamingTranscriber
 import com.sivrad.core.tools.ToolRegistry
 import com.sivrad.core.tools.builtin.BuiltinTools
@@ -45,6 +47,9 @@ class AssistantEngine(
         val transcriber: StreamingTranscriber,
         val vad: VadModel,
         val llm: LlmEngine,
+        /** Short names of the loaded models, for the overlay's stats line. */
+        val llmName: String,
+        val refinerName: String?,
     )
 
     val registry = ToolRegistry(BuiltinTools.all())
@@ -91,19 +96,36 @@ class AssistantEngine(
 
     private suspend fun load() = mutex.withLock {
         if (loaded != null) return@withLock
-        if (catalog.missing().isNotEmpty()) {
+        if (catalog.missingForSelection().isNotEmpty()) {
             _status.value = Status.MissingModels
             return@withLock
         }
         _status.value = Status.Loading
         try {
             val t0 = System.nanoTime()
-            val llm = LlmEngine(LlmConfig(catalog.llm, threads = settings.values.value.llmThreads))
+            val llmOption = catalog.selectedLlm
+            val refinerOption = catalog.selectedRefiner
+            val llm = LlmEngine(
+                LlmConfig(
+                    catalog.file(llmOption.file),
+                    threads = settings.values.value.llmThreads,
+                    noThinking = llmOption.noThinking,
+                ),
+            )
             // ASR/VAD (onnxruntime) and the LLM (llama.cpp) load in parallel.
-            val asr = scope.async(Dispatchers.Default) { StreamingTranscriber(catalog.asr) }
+            val asr = scope.async(Dispatchers.Default) {
+                StreamingTranscriber(
+                    catalog.streamingModel(catalog.selectedStreaming),
+                    refiner = catalog.refinerModel(refinerOption)?.let { OfflineTranscriber(it) },
+                )
+            }
             val vad = scope.async(Dispatchers.Default) { VadModel(catalog.vad) }
             llm.load()
-            val l = Loaded(asr.await(), vad.await(), llm)
+            val l = Loaded(
+                asr.await(), vad.await(), llm,
+                llmName = llmOption.label,
+                refinerName = refinerOption.label.takeIf { refinerOption != ModelOption.NoRefiner },
+            )
             // Evaluate the (constant) system prompt once, so the KV cache
             // already holds it when the first question arrives.
             Agent(llm, registry).warmUp()

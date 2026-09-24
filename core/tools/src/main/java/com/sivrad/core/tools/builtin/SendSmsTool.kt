@@ -12,6 +12,7 @@ import android.net.Uri
 import android.provider.ContactsContract.CommonDataKinds.Phone
 import android.telephony.SmsManager
 import com.sivrad.core.tools.Confirmation
+import com.sivrad.core.tools.NameMatcher
 import com.sivrad.core.tools.ObjectSchema
 import com.sivrad.core.tools.Preparation
 import com.sivrad.core.tools.StringParam
@@ -34,6 +35,7 @@ class SendSmsTool : Tool {
     override val description =
         "Send a text message (SMS) to a person in the user's contacts. The user sees the recipient and message and must confirm before it is sent."
     override val requiresUnlock = true
+    override val replyDirectly = true
     override val parameters = ObjectSchema.of(
         "contact_name" to StringParam("Name of the contact as saved in the phone's contacts.", maxLength = 100),
         "message" to StringParam("The exact text to send.", maxLength = 1000),
@@ -118,7 +120,16 @@ class SendSmsTool : Tool {
          * else mobile, else the first, is used.
          */
         suspend fun resolveContact(ctx: Context, query: String): Resolution = withContext(Dispatchers.IO) {
-            val uri = Uri.withAppendedPath(Phone.CONTENT_FILTER_URI, Uri.encode(query))
+            val filtered = queryPhones(ctx, Uri.withAppendedPath(Phone.CONTENT_FILTER_URI, Uri.encode(query)))
+            val exact = pick(query, filtered)
+            if (exact != Resolution.NotFound) return@withContext exact
+            // The provider's filter is a prefix match, so a misheard name
+            // ("Jon" for "John", "Aiden" for "Aidan") finds nothing; fall back
+            // to fuzzy matching over every contact with a number.
+            fuzzyPick(query, queryPhones(ctx, Phone.CONTENT_URI))
+        }
+
+        private fun queryPhones(ctx: Context, uri: Uri): List<Row> {
             val rows = mutableListOf<Row>()
             ctx.contentResolver.query(
                 uri,
@@ -130,7 +141,13 @@ class SendSmsTool : Tool {
                     rows += Row(c.getLong(0), c.getString(1) ?: number, number, c.getInt(3), c.getInt(4) != 0)
                 }
             }
-            pick(query, rows)
+            return rows
+        }
+
+        fun fuzzyPick(query: String, rows: List<Row>): Resolution {
+            val byContact = rows.groupBy { it.contactId }.values.toList()
+            val match = NameMatcher.best(query, byContact, { it.first().name }) ?: return Resolution.NotFound
+            return pick(match.name, match.item)
         }
 
         data class Row(val contactId: Long, val name: String, val number: String, val type: Int, val primary: Boolean)

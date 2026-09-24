@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.currentCoroutineContext
 
 /**
- * Downloads whatever [ModelCatalog.missing] lists, one file at a time, into
+ * Downloads model files one at a time into
  * a `.part` file that resumes with an HTTP Range request after an
  * interruption, verifies the SHA-256, and only then moves it into place — so
  * a file at its final path is always a complete, verified one.
@@ -53,11 +53,12 @@ class ModelDownloader(private val catalog: ModelCatalog, private val scope: Coro
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    fun start(onComplete: () -> Unit = {}) {
+    /** Downloads whichever of [files] are not on disk yet. One batch at a time. */
+    fun start(files: List<ModelFile>, onComplete: () -> Unit = {}) {
         if (job?.isActive == true) return
         job = scope.launch(Dispatchers.IO) {
             try {
-                val todo = catalog.missing()
+                val todo = files.filterNot { catalog.file(it).isFile }
                 todo.forEachIndexed { i, m -> fetch(m, i, todo.size) }
                 _state.value = State.Done
                 onComplete()

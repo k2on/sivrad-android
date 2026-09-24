@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #
 # Only the libraries: no tools, examples, server, tests or `common` (which
 # would pull in OpenSSL for model downloads). Nothing here may reach the
-# network at configure time, which rules out KleidiAI (FetchContent).
+# network at configure time.
 set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
@@ -24,10 +24,22 @@ set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
 
 set(GGML_NATIVE          OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP          OFF CACHE BOOL "" FORCE)
-set(GGML_CPU_KLEIDIAI    OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE       ON  CACHE BOOL "" FORCE)
 
 if(ANDROID_ABI STREQUAL "arm64-v8a")
+    # Arm's KleidiAI micro-kernels for Q4_0 / Q8_0 matmuls (i8mm, dotprod,
+    # SME where present). ggml fetches them with FetchContent; point that at
+    # the vendored submodule (the same v1.24.0 llama.cpp pins) so the build
+    # stays offline. Nix copies the `kleidiai` flake input to the same path.
+    set(KLEIDIAI_DIR ${CMAKE_CURRENT_LIST_DIR}/kleidiai)
+    if(EXISTS ${KLEIDIAI_DIR}/CMakeLists.txt)
+        set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+        set(FETCHCONTENT_SOURCE_DIR_KLEIDIAI ${KLEIDIAI_DIR} CACHE PATH "" FORCE)
+    else()
+        message(WARNING "kleidiai submodule missing (git submodule update --init); building without KleidiAI")
+        set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
+    endif()
+
     # Tensor G3 (Cortex-X3 / A715 / A510) is Armv9.0 and has dotprod, fp16
     # and i8mm, which is what the Q4_K / Q8 matmul kernels want.
     # TODO(on-device): benchmark against `armv8.2-a+dotprod+fp16` and with

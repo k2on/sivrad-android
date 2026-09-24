@@ -21,12 +21,18 @@ public class Main {
         return new String(n.applyTemplate(h, r, c, true), StandardCharsets.UTF_8);
     }
 
+    // -Dsivrad.nothink=true: hybrid thinking models (Qwen3 0.6B/1.7B), as LlmConfig.noThinking.
+    static final boolean NO_THINK = Boolean.getBoolean("sivrad.nothink");
+
     static String gen(String prompt, String grammar) {
+        if (NO_THINK) prompt += "<think>\n\n</think>\n\n";
         StringBuilder out = new StringBuilder();
         long t = System.nanoTime();
         int k = n.generate(h, b(prompt), grammar == null ? null : b(grammar), 256, new float[]{0.7f, 0.8f, 20f, 0f, 42f},
             p -> { out.append(new String(p, StandardCharsets.UTF_8)); return true; });
-        System.err.printf("  (%d tokens in %.1fs)%n", k, (System.nanoTime() - t) / 1e9);
+        float[] st = n.lastStats(h);
+        System.err.printf("  (read %d new tokens in %.2fs, wrote %d at %.1f tok/s)%n",
+            (int) (st[0] - st[1]), st[2] / 1000, (int) st[3], st[4] > 0 ? st[3] * 1000 / st[4] : 0);
         return out.toString();
     }
 

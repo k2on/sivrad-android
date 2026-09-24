@@ -26,6 +26,7 @@ leaves the phone unless you allowlist an HTTP service.
 
 - [Installing on GrapheneOS](#installing-on-grapheneos)
 - [Models](#models)
+- [Speed and accuracy](#speed-and-accuracy)
 - [Using it](#using-it)
 - [Tools and the lock screen](#tools-and-the-lock-screen)
 - [How it works](#how-it-works)
@@ -44,9 +45,11 @@ leaves the phone unless you allowlist an HTTP service.
 3. **Open Sivrad** from the launcher. The setup screen walks through the rest:
    1. **Permissions.** Tap *Grant permissions*: microphone (required),
       contacts and SMS (only used by `send_sms`).
-   2. **Models.** Tap *Download models* (about 2.6 GB, see [Models](#models)).
-      Use Wi-Fi. You can leave the screen while it downloads; *Pause* and
-      *Retry* resume where the download stopped.
+   2. **Models.** Tap *Download selected models* (about 2.7 GB for the
+      defaults; see [Models](#models) for the alternatives).
+      Use Wi-Fi. You can leave the screen while it downloads. After *Pause*
+      or a failure, tapping the download button again resumes where it
+      stopped.
    3. **Default assistant.** Tap *Choose default assistant*, which opens
       Settings → Apps → Default apps → *Digital assistant app*. Set
       *Default digital assistant app* to **Sivrad**.
@@ -68,16 +71,47 @@ from then on.
 ## Models
 
 The models are not in the APK. The setup screen downloads them from Hugging
-Face, at URLs pinned to a commit so the checksums cannot drift:
+Face, at URLs pinned to a commit so the checksums cannot drift. There are
+three slots, each with several options. You can download as many as you like
+and switch between them with the radio buttons. The overlay prints timings
+under each reply, so you can compare options on your own voice and phone.
 
-| file | size | from |
+**Live speech recognition** (streaming, shows words as you speak):
+
+| option | size | WER* | notes |
+|---|---|---|---|
+| **Kroko Zipformer (2025)** (default) | 71 MB | ~6% | most accurate and fastest streaming model tested |
+| NeMo FastConformer 80 ms | 137 MB | 14–17% | ~8× slower than Kroko |
+| Zipformer LibriSpeech (2023) | 75 MB | 15–18% | the original model, audiobook-trained |
+
+**Final transcript (second pass)**, optional. When you stop talking, the
+whole utterance is transcribed again by an offline model, and that
+transcript goes to the LLM:
+
+| option | size | WER* | notes |
+|---|---|---|---|
+| Off | – | – | use the live transcript |
+| **Moonshine base** (default) | 287 MB | 1–4% | most accurate tested |
+| Moonshine tiny | 124 MB | 6–7% | faster |
+| Parakeet TDT 0.6B v2 | 661 MB | 7% | trained on far more real speech than the test voices; slowest |
+
+**Language model:**
+
+| option | size | notes |
 |---|---|---|
-| `asr/encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx` | 71 MB | [csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26](https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26) |
-| `asr/decoder-epoch-99-avg-1-chunk-16-left-128.onnx` | 2 MB | same |
-| `asr/joiner-epoch-99-avg-1-chunk-16-left-128.onnx` | 1 MB | same |
-| `asr/tokens.txt` | 5 kB | same |
-| `vad/silero_vad.onnx` | 1.8 MB | [csukuangfj/vad](https://huggingface.co/csukuangfj/vad) |
-| `llm/Qwen3-4B-Instruct-2507-Q4_K_M.gguf` | 2.5 GB | [unsloth/Qwen3-4B-Instruct-2507-GGUF](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF) |
+| **Qwen3 4B Instruct 2507 · Q4_0** (default) | 2.4 GB | Q4_0 uses llama.cpp's fastest Arm kernels (KleidiAI, i8mm) |
+| Qwen3 4B Instruct 2507 · Q4_K_M | 2.5 GB | the original; slightly better quality, slower on Arm |
+| Qwen3 1.7B · Q4_0 | 1.1 GB | ~2–2.5× faster; noticeably weaker (set 30 s for "five minutes" in testing) |
+| Qwen3 0.6B · Q4_0 | 382 MB | for comparing speed |
+| Custom | – | any GGUF URL from settings |
+
+\* Word error rate on `tools/asr-bench`: 24 assistant commands synthesised with
+two Piper voices plus light noise, ranges over runs. Synthetic speech is
+cleaner than a real voice in a real room. Read these as a ranking.
+
+Silero VAD (1.8 MB, [csukuangfj/vad](https://huggingface.co/csukuangfj/vad))
+is always downloaded. *Download selected models* fetches whatever the current
+selection is missing.
 
 Each file downloads to a `.part` file. An interrupted download resumes with an
 HTTP `Range` request. A file only moves to its final name after its size and
@@ -89,12 +123,53 @@ The files live in **device-protected storage**
 settings. The assistant's components are `directBootAware`, so they can read
 the models before the first unlock after a reboot.
 
-**Using a different LLM.** Under *Settings* on the setup screen, enter
-another GGUF URL and its SHA-256 (or leave the hash blank to skip the check),
-tap *Save*, then *Download models*. The model has to use a chat template
-llama.cpp's built-in renderer recognises (ChatML-style works) and Qwen's
-Hermes-style `<tool_call>` format. Other Qwen3 and Qwen2.5 instruct models
-fit that description.
+**Using a different LLM.** Under *Settings* on the setup screen, enter a GGUF
+URL and its SHA-256 (or leave the hash blank to skip the check) and tap
+*Save*. It appears as *Custom* under *Language model*. The model has to use a
+chat template llama.cpp's built-in renderer recognises (ChatML-style works)
+and Qwen's Hermes-style `<tool_call>` format. Other Qwen3 and Qwen2.5 models
+fit that description. Tick *Hybrid thinking model* for Qwen3 releases that
+think by default (the non-2507 ones). That starts every reply with an empty
+`<think></think>` block, as their template does with `enable_thinking=false`.
+
+## Speed and accuracy
+
+What each change does, and what to look at when tuning:
+
+- **Timings in the overlay.** Under each reply:
+  `Moonshine base 410 ms · Qwen3 4B: read 45 tok in 0.6 s, wrote 12 tok at 9.1 tok/s`.
+  The first part is the second-pass transcription. "Read" is prompt tokens
+  evaluated this turn; the ~1,000-token system prompt is cached, so it is
+  normally only your words and any tool result. "Wrote" is generation speed.
+  The same numbers go to logcat: `adb logcat -s sivrad-llm AssistantEngine`.
+- **One model call for simple tools.** Timers, alarms, opening an app and a
+  sent text reply with the tool's own message ("Timer set for 5 min (pasta).")
+  instead of asking the model to phrase one. A successful tool request now
+  costs one model call instead of two. Failures still go back to the model to
+  explain (`Tool.replyDirectly`).
+- **KleidiAI.** Arm's matmul micro-kernels, which llama.cpp uses for Q4_0 and
+  Q8_0 weights. Vendored as a submodule (`core/llm/src/main/cpp/kleidiai`)
+  and a flake input, because llama.cpp would otherwise download it during
+  CMake's configure step. They do nothing for Q4_K_M, which is why Q4_0 is
+  now the default.
+- **Threads.** Settings → *Inference threads*. The Tensor G3 has 1 Cortex-X3,
+  4 A715 and 4 A510 cores. Generation waits for the slowest thread, so a
+  thread that lands on an A510 slows everything. Try 3, 4 and 5 and compare
+  "wrote … tok/s".
+- **Speech: flush length.** At the end of an utterance the streaming model
+  is now fed one second of silence, instead of 0.3 s, to flush its last
+  chunk. With 0.3 s the last word or two was often dropped. That was a large
+  part of the old accuracy problem: the original model went from ~18% to
+  ~15% WER, and Kroko from ~25% to ~6%.
+- **Names.** Speech recognition often gets names slightly wrong ("Jon" for
+  "John", "Aiden" for "Aidan"). `send_sms` and `open_app` fall back to fuzzy
+  matching (spelling plus a small phonetic key) when the exact lookup fails.
+  They refuse to guess when two candidates are about equally close. `open_app`
+  also survives package names small models invent
+  (`signalmobile.com.signal` → Signal).
+  sherpa-onnx's own hotword biasing would be better still. It needs a
+  SentencePiece vocabulary file (`bpe.vocab`) that none of these models ship,
+  and a misconfiguration makes it exit the process, so it is left out.
 
 ## Using it
 
@@ -262,11 +337,13 @@ SDK and Gradle and replays Gradle's Maven traffic from a recording
   llama.cpp.
 - `android.mkGradleBuild`: the APK, restoring that layer.
 
-llama.cpp reaches the Nix build through the `llama-cpp` flake input, pinned to
-the **same commit as the submodule**. A flake's own source excludes
-submodules, and including them fails on the shallow clones CI makes. The
-`flake-check` job fails if the two pins disagree. To bump llama.cpp, update
-both:
+llama.cpp and KleidiAI reach the Nix build through the `llama-cpp` and
+`kleidiai` flake inputs, pinned to the **same commits as the submodules**. A
+flake's own source excludes submodules, and including them fails on the
+shallow clones CI makes. The `flake-check` job fails if a pair disagrees.
+KleidiAI's version is the one llama.cpp's `ggml-cpu/CMakeLists.txt` names
+(`KLEIDIAI_COMMIT_TAG`), so bump it along with llama.cpp when that changes.
+To bump llama.cpp, update both:
 
 ```sh
 git -C core/llm/src/main/cpp/llama.cpp fetch --depth 1 origin tag bNNNN
@@ -290,22 +367,13 @@ provides them). The APK only includes `arm64-v8a`.
 
 ### CI
 
-> **Setup step:** the workflow is committed at `ci/build.yml` rather than
-> `.github/workflows/build.yml`. The credentials that created this
-> repository's first commit could not write workflow files. Enable CI with:
->
-> ```sh
-> mkdir -p .github/workflows && git mv ci/build.yml .github/workflows/build.yml
-> git commit -m "Enable CI" && git push
-> ```
-
-`.github/workflows/build.yml` (see above) runs on push, pull request and manual dispatch:
+`.github/workflows/build.yaml` runs on push, pull request and manual dispatch:
 
 - **apk**: installs Nix (`DeterminateSystems/nix-installer-action`), enables
   `magic-nix-cache-action`, runs `nix build .#apk` and uploads the APK as the
   `sivrad-debug-apk` artifact.
-- **flake-check**: checks that the submodule and the `llama-cpp` input pin the
-  same commit, then runs `nix flake check`.
+- **flake-check**: checks that the llama.cpp and KleidiAI submodules pin the
+  same commits as their flake inputs, then runs `nix flake check`.
 
 ## Regenerating gradle-deps.json
 
@@ -368,8 +436,9 @@ but the places where platform behaviour decides the outcome are marked
 ```
 
 They cover schema validation and the registry's error paths, contact
-resolution, the HTTP allowlist, the GBNF generator, the Qwen prompt layout
-and output parsing. The grammar test writes the generated grammar to
+resolution, fuzzy name matching (contacts, app labels, invented package
+names), the HTTP allowlist, the GBNF generator, the Qwen prompt layout and
+output parsing. The grammar test writes the generated grammar to
 `core/llm/build/tool-grammar.gbnf`.
 
 ## Testing the LLM loop without a phone
@@ -396,3 +465,16 @@ MODEL: The capital of France is Paris.
 USER: Text mom that I'm running late
 MODEL: <tool_call>\n{"name": "send_sms", "arguments": {"contact_name": "mom", "message": "I'm running late."}}\n</tool_call>
 ```
+
+For a hybrid thinking model (Qwen3 0.6B/1.7B), pass
+`SIVRAD_JAVA_OPTS=-Dsivrad.nothink=true`. The harness prints the same prompt
+and generation rates the app shows in its overlay.
+
+## Benchmarking speech models
+
+`tools/asr-bench/run.sh` downloads every speech model the app offers, plus
+two Piper TTS voices. It synthesises 24 assistant commands, adds light
+noise, and prints word error rate and real-time factor for each model. The
+WER figures in [Models](#models) come from it. `ONLY=on` or `ONLY=off` limits
+it to the streaming or second-pass models, and `PAD=4800` reproduces the old
+0.3 s flush.

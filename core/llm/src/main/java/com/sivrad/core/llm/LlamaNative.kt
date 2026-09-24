@@ -27,6 +27,9 @@ internal object LlamaNative {
 
     external fun contextSize(handle: Long): Int
 
+    /** {promptTokens, reusedTokens, prefillMs, generatedTokens, generateMs} of the last [generate]. */
+    external fun lastStats(handle: Long): FloatArray
+
     /** Null if the model has no chat template llama.cpp understands. */
     external fun applyTemplate(
         handle: Long,

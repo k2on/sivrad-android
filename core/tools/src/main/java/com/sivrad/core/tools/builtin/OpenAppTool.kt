@@ -2,6 +2,7 @@ package com.sivrad.core.tools.builtin
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import com.sivrad.core.tools.NameMatcher
 import com.sivrad.core.tools.ObjectSchema
 import com.sivrad.core.tools.Preparation
 import com.sivrad.core.tools.StringParam
@@ -23,6 +24,7 @@ class OpenAppTool : Tool {
     override val description =
         "Open an installed app. Pass its package name (e.g. org.mozilla.firefox) or, if unknown, its name as shown in the launcher."
     override val requiresUnlock = true
+    override val replyDirectly = true
     override val parameters = ObjectSchema.of(
         "package_name" to StringParam("Package name or visible app name.", maxLength = 200),
         required = listOf("package_name"),
@@ -49,10 +51,36 @@ class OpenAppTool : Tool {
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
             PackageManager.ResolveInfoFlags.of(0),
         ).map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
-        val match = launchers.firstOrNull { it.first.equals(query, ignoreCase = true) }
-            ?: launchers.filter { it.first.contains(query, ignoreCase = true) }.singleOrNull()
-            ?: return null
+        val match = pickLauncher(query, launchers) ?: return null
         val intent = pm.getLaunchIntentForPackage(match.second) ?: return null
         return match.first to intent
+    }
+
+    companion object {
+        private val NOISE = setOf("com", "org", "net", "io", "app", "apps", "android", "mobile", "www", "the")
+
+        /**
+         * Picks the launcher entry ([label] to package) for [query]: an exact
+         * label, a unique label containing it, then a fuzzy label match. Small
+         * models invent package names ("signalmobile.com.signal"), so the
+         * pieces of a dotted name are tried as labels too, and against the
+         * real package names.
+         */
+        fun pickLauncher(query: String, launchers: List<Pair<String, String>>): Pair<String, String>? {
+            val q = query.trim()
+            launchers.firstOrNull { it.first.equals(q, ignoreCase = true) }?.let { return it }
+            launchers.filter { it.first.contains(q, ignoreCase = true) }.singleOrNull()?.let { return it }
+            NameMatcher.best(q, launchers, { it.first })?.let { return it.item }
+            val pieces = q.split('.', ' ', '_', '-').map { it.lowercase() }.filter { it.length > 2 && it !in NOISE }.distinct()
+            if (pieces.size < 2 && !q.contains('.')) return null
+            for (piece in pieces) {
+                launchers.firstOrNull { it.first.equals(piece, ignoreCase = true) }?.let { return it }
+            }
+            val byPackage = launchers.filter { (_, pkg) ->
+                val parts = pkg.lowercase().split('.')
+                pieces.any { it in parts }
+            }
+            return byPackage.singleOrNull()
+        }
     }
 }
